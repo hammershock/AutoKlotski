@@ -1,22 +1,26 @@
 import heapq
 from collections import defaultdict
+import sys
+import os
+import subprocess
+import glob
+
 
 import numpy as np
 from tqdm import tqdm
 
 
 class State:
-    def __init__(self, game: 'Klotski', board):
+    def __init__(self, game: 'Klotski', board, parent=None, from_action=None):
         self.game = game
         self.board = board
-        self.pattern = np.copy(board)
-        for idx in self.game.block_indices:
-            num_blocks = self.game.block_indices[idx]
-            self.pattern[np.where(self.board == idx)] = num_blocks
+        self.pattern = self.game.pattern_mapping(board)  # 计算pattern
+        self.parent = parent
+        self.from_action = from_action
 
     def __hash__(self):
         return hash(tuple(self.pattern.flatten().tolist()))
-
+    
     def __eq__(self, other):
         return np.array_equal(self.pattern, other.pattern)
     
@@ -31,17 +35,17 @@ class State:
             xs, ys = np.where(self.board == block_idx)
         new_xs = xs + dx
         new_ys = ys + dy
-        if np.all((new_xs >= 0) & (new_xs < self.board.shape[0]) &
+        if np.all((new_xs >= 0) & (new_xs < self.board.shape[0]) &  # 确保移动不会出界
                   (new_ys >= 0) & (new_ys < self.board.shape[1])):
-            # 创建一个条件数组，检查是否每个新位置要么是空要么是当前的block_idx
+            # 确保移动可以进行
             condition = (self.board[new_xs, new_ys] == self.game.empty) | (self.board[new_xs, new_ys] == block_idx)
             if np.all(condition):
                 new_board = np.copy(self.board)
                 new_board[xs, ys] = self.game.empty
                 new_board[new_xs, new_ys] = block_idx
-                return State(self.game, new_board)
+                return State(self.game, new_board, self, (block_idx, dx, dy))
         return None  # 不可移动
-        
+    
     def next_states(self):
         for block_idx in self.game.block_indices:
             directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]
@@ -50,26 +54,48 @@ class State:
                 new_state = self.move_(block_idx, dx, dy, xs, ys)
                 if new_state is not None:
                     yield (block_idx, dx, dy), new_state
-
+    
     def is_terminal(self) -> bool:
         return np.all(self.board[self.game.end_region] == self.game.end_pattern[self.game.end_region])
 
 
 class Klotski:
-
     def __init__(self, board, end_pattern, empty=0):
+        self.board = board
+        self.end_pattern = end_pattern
+        
+        self.block_pattern = defaultdict(list)
+        index_map = {}
+        for idx in np.unique(board):
+            if idx != empty:
+                xs, ys = np.where(board == idx)
+                xs -= np.min(xs)
+                ys -= np.min(ys)
+                key = tuple(np.array([xs, ys]).flatten().tolist())
+                self.block_pattern[key].append(idx)
+        
+        n = 0
+        for lst in self.block_pattern.values():
+            if n == empty:
+                n += 1
+            for block_idx in lst:
+                index_map[block_idx] = n
+            n += 1
+            
+        self.pattern_mapping = np.vectorize(lambda x: index_map.get(x, x))
+        
         self.block_indices = {idx: np.sum(board == idx) for idx in np.unique(board) if idx != empty}
         self.state = State(self, board)
         self.empty = empty
         self.end_pattern = end_pattern
         self.end_region = end_pattern != empty
         self.end_indices = np.unique(self.end_region)
-        
+    
     def move(self, block_idx, dx, dy) -> None:
         new_state = self.state.move_(block_idx, dx, dy)
         if new_state is not None:
             self.state = new_state
-        
+    
     def h(self, state):
         # 计算 h(n)，即从当前状态到目标状态的预估成本
         total_dist = 0
@@ -81,19 +107,32 @@ class Klotski:
                 total_dist += dist
         return total_dist
     
-    def a_star(self):
+    def a_star(self, accelerate=False):
+        if accelerate:
+            try:
+                if not len(glob.glob(f'./cpp/build/*.so')):
+                    os.system(f'/usr/bin/zsh ./cpp/build.sh')
+                return self.a_star_c()
+            except ImportError:
+                pass
+            
         open_set = []  # 优先队列
-        heapq.heappush(open_set, (0 + self.h(self.state), self.state, []))  # (f(n), 状态, 路径)
+        heapq.heappush(open_set, (0 + self.h(self.state), self.state))  # (f(n), 状态)
         visited = {self.state}
         g_scores = defaultdict(lambda: float('inf'))  # 从起始点到当前点的成本
         g_scores[self.state] = 0
         
         p_bar = tqdm()
         while open_set:
-            _, current_state, path = heapq.heappop(open_set)
+            _, current_state = heapq.heappop(open_set)
             
             if current_state.is_terminal():
-                return path
+                path = []
+                while current_state.parent is not None:
+                    path.append((current_state.from_action, current_state))
+                    current_state = current_state.parent
+                print(f'size: {len(visited)}')
+                return path[::-1]
             
             for action, next_state in current_state.next_states():
                 p_bar.update()
@@ -104,11 +143,26 @@ class Klotski:
                     f_score = tentative_g_score + h_score
                     if next_state not in visited:
                         visited.add(next_state)
-                        heapq.heappush(open_set, (f_score, next_state, path + [(action, next_state)]))
+                        heapq.heappush(open_set, (f_score, next_state))
         p_bar.close()
         return None
-
-
+    
+    def a_star_c(self):
+        sys.path.append('./cpp/build')
+        import klotski_module
+        klotski = klotski_module.Klotski(self.state.board.tolist(), self.end_pattern.tolist(), self.empty)
+        print('using accelerate mode!')
+        solution = klotski.a_star()
+        if solution is None:
+            return None
+        ret = []
+        for s in solution:
+            ret.append(((s.block_idx, s.dx, s.dy), None))
+            # yield (s.block_idx, s.dx, s.dy), None
+        print(f'steps: {klotski.steps}')
+        return ret
+    
+    
 if __name__ == "__main__":
     # 使用示例
     board = np.array([[10, 1, 1, 2],

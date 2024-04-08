@@ -2,7 +2,7 @@ import time
 
 import pygame
 import numpy as np
-from klotski_ import Klotski
+from klotski import Klotski
 
 
 class KlotskiGUI:
