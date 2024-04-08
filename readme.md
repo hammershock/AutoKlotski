@@ -1,5 +1,8 @@
 # 自动求解华容道(klotski)
 
+![Peek 2024-04-08 11-40](https://github.com/hammershock/AutoKlotski/assets/109429530/236ef430-f89f-4131-8084-47ca615d10be)
+
+
 ```bash
 pip install -r requirements.txt
 ```
